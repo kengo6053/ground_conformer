@@ -1,9 +1,9 @@
 bl_info = {
-    "name":        "Ground_Conformer(my_addon)",
+    "name":        "Ground Conformer (my_addon)",
     "author":      "Kengo_Hoi",
-    "version":     (0, 2, 0),
+    "version":     (0, 3, 0),
     "blender":     (3, 6, 0),
-    "location":    "View3D > Sidebar > TA Tools",
+    "location":    "View3D ▸ Sidebar ▸ TA",
     "description": "Snap selected props onto ground surface (bottom-face contact)",
     "category":    "Object",
 }
@@ -12,10 +12,25 @@ import bpy
 from mathutils import Vector
 
 def lowest_corner_offset(obj, normal):
-    """原点から一番下のバウンディングボックス頂点までの距離を返す"""
-    corners = [obj.matrix_world @ Vector(c) for c in obj.bound_box]                # ローカル→ワールド座標へ変換 :contentReference[oaicite:0]{index=0}
-    dists   = [(co - obj.location).dot(normal) for co in corners]                  # 法線方向のスカラー距離
-    return min(dists)                                                              # 最小＝最下端（負値）
+    """原点から最下端バウンディングボックス頂点までの距離（法線方向スカラー）"""
+    corners = [(obj.matrix_world @ Vector(c)) for c in obj.bound_box]  # ローカル → ワールド:contentReference[oaicite:2]{index=2}
+    return min((co - obj.location).dot(normal) for co in corners)
+
+def cast_ground_ray(scene, depsgraph, obj, ray_max):
+    """自分自身を無視して真下へレイを飛ばし、地面のヒット位置と法線を返す"""
+    up_vec     = Vector((0, 0, 1))
+    down_vec   = -up_vec
+    start      = obj.location + up_vec * ray_max      # オブジェクト上空から発射:contentReference[oaicite:3]{index=3}
+    hit, loc, normal, index, hit_obj, _ = scene.ray_cast(
+        depsgraph, start, down_vec, distance=ray_max * 2)
+
+    # 自分自身をヒットした場合はわずかに先へ進めて再試行:contentReference[oaicite:4]{index=4}
+    epsilon = 1e-4
+    while hit and hit_obj == obj:
+        start = loc + down_vec * epsilon
+        hit, loc, normal, index, hit_obj, _ = scene.ray_cast(
+            depsgraph, start, down_vec, distance=ray_max * 2)
+    return hit, loc, normal
 
 class OBJECT_OT_ground_conform(bpy.types.Operator):
     bl_idname  = "object.ground_conform"
@@ -27,27 +42,25 @@ class OBJECT_OT_ground_conform(bpy.types.Operator):
 
     def execute(self, ctx):
         scn      = ctx.scene
-        depsgra  = ctx.evaluated_depsgraph_get()                                   # 評価後データで正確にヒット判定 :contentReference[oaicite:1]{index=1}
-        down_vec = Vector((0, 0, -1))
+        depsgra  = ctx.evaluated_depsgraph_get()
 
         for obj in ctx.selected_objects:
             if obj.type != 'MESH':
                 continue
 
-            # 1) レイキャストで真下のサーフェスを取得
-            hit, loc, normal, *_ = scn.ray_cast(depsgra, obj.location, down_vec,
-                                                distance=self.ray_max)            # :contentReference[oaicite:2]{index=2}
+            hit, loc, normal = cast_ground_ray(scn, depsgra, obj, self.ray_max)
             if not hit:
+                self.report({'INFO'}, f"No ground hit for {obj.name}")
                 continue
 
-            # 2) 必要なら法線合わせ（Z軸→ヒット法線）
+            # 1) 必要なら法線合わせ（Z → ground normal）:contentReference[oaicite:5]{index=5}
             if self.align_rotation:
                 obj.rotation_mode = 'QUATERNION'
                 obj.rotation_quaternion = normal.to_track_quat('Z', 'Y')
 
-            # 3) 原点から底面までのオフセット距離を求め，法線方向に移動
-            offset = lowest_corner_offset(obj, normal)                             # 負値
-            obj.location = loc - normal * offset                                   # 底面がちょうど接地
+            # 2) 最下端までのオフセットを計算して位置を調整
+            offset = lowest_corner_offset(obj, normal)  # 負値
+            obj.location = loc - normal * offset
 
         return {'FINISHED'}
 
